@@ -20,6 +20,7 @@ Pwn4Sage contains the following functions (if you don't know the specific use an
 - `recvline_contains(key_words)`
 - `sendafter(delim, data, timeout)`
 - `interactive()`
+- `close()`
 
 ## Installation
 
