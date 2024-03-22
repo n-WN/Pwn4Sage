@@ -1,6 +1,6 @@
 # Pwn4Sage's Guide
 
-<img width="531" alt="image" src="https://github.com/n-WN/Pwn4Sage/assets/30841158/93162b04-5325-420a-a092-799fbd0483c8">
+<img width="554" alt="image" src="https://github.com/n-WN/Pwn4Sage/assets/30841158/9bcebca9-b04e-4b9e-b2da-59b334d5eeb5">
 
 As we all know, we cannot use **pwntools** directly in **SageMath**.
 
