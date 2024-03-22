@@ -8,10 +8,22 @@ class context:
     log_level = "info"
 
     @staticmethod
-    def set_log_level(level):
+    def log_level(level):
         context.log_level = level
 
 def log(message, level="info", length=None, interactive_mode=False, is_input=False):
+    log_levels = {
+        "debug": 10,
+        "info": 20,
+        "warning": 30,
+        "error": 40
+    }
+    current_log_level = log_levels.get(context.log_level, 20)
+    message_log_level = log_levels.get(level, 20)
+
+    if message_log_level < current_log_level:
+        return  # 不打印低于当前日志级别的消息
+
     colors = {
         "info": "\033[94m",
         "debug": "\033[92m",
@@ -39,6 +51,7 @@ def log(message, level="info", length=None, interactive_mode=False, is_input=Fal
     else:
         for line in message.splitlines():
             print(f"{message_format} {line}")
+
 
 class remote:
     def __init__(self, HOST, PORT):
@@ -110,12 +123,9 @@ class remote:
         finally:
             self.close()
 
-# tesk
-"""
 if __name__ == "__main__":
-    context.set_log_level("debug")
+    context.log_level("debug") # 生效于非交互模式
     r = remote("titan.picoctf.net", 52525)
-    r.interactive()
-    # r.sendline(b"hello")
-    # r.close()
-"""
+    # r.interactive()
+    r.sendline(b"hello")
+    r.close()
