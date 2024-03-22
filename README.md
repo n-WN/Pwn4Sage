@@ -1,7 +1,5 @@
 # Pwn4Sage's Guide
 
-不支持输出调试级别信息
-
 As we all know, we cannot use **pwntools** directly in **SageMath**.
 
 In order to solve this problem, you can use Linux.
