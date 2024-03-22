@@ -29,7 +29,7 @@ This simple python script is available on PyPI and can be installed via pip.
 
 - `pip install Pwn4Sage`
 
-In the notebook of SageMath, you can use `!pip install Pwn4Sage` to install.
+In the notebook of SageMath, you can use `%pip install Pwn4Sage` to install.
 
 ## Usage
 
