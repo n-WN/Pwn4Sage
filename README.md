@@ -1,5 +1,7 @@
 # Pwn4Sage's Guide
 
+<img width="531" alt="image" src="https://github.com/n-WN/Pwn4Sage/assets/30841158/93162b04-5325-420a-a092-799fbd0483c8">
+
 As we all know, we cannot use **pwntools** directly in **SageMath**.
 
 In order to solve this problem, you can use Linux.
@@ -43,6 +45,7 @@ s = remote('39.105.144.62', 2022)
 # print(s.recvline_contains(b'XXXX'))
 s.interactive()
 ```
+
 
 
 
