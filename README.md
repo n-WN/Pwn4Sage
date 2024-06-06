@@ -2,6 +2,10 @@
 
 <img width="766" alt="截屏2024-03-23 02 26 11" src="https://github.com/n-WN/Pwn4Sage/assets/30841158/a082f0c8-4705-494f-89d3-d8dde9b94c7e">
 
+还有bug, 不建议在比赛中使用
+
+There are also bugs, not recommended for use in matches
+
 As we all know, we cannot use **pwntools** directly in **SageMath**.
 
 In order to solve this problem, you can use Linux.
