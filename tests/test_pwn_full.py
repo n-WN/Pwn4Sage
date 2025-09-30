@@ -7,6 +7,8 @@ import time
 import tempfile
 import pathlib
 import re
+import socket
+import threading
 
 import pytest
 
@@ -147,6 +149,59 @@ def test_listen_ipv4_and_fromsocket():
     assert r2.recvline(timeout=1.0) == b"E:zzz\n"
     r2.close()
     srv.close()
+
+
+def test_remote_udp_roundtrip():
+    print("[FULL] remote UDP roundtrip")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+
+    stop = threading.Event()
+
+    def server():
+        try:
+            data, addr = srv.recvfrom(4096)
+            print("[UDP srv] recv:", data)
+            srv.sendto(b"PONG\n", addr)
+        finally:
+            stop.set()
+            srv.close()
+
+    threading.Thread(target=server, daemon=True).start()
+
+    cli = remote("127.0.0.1", port, typ="udp", timeout=2.0)
+    try:
+        cli.sendline(b"PING")
+        out = cli.recvline(timeout=2.0)
+        print("[UDP cli] recv:", out)
+        assert out == b"PONG\n"
+    finally:
+        cli.close()
+    stop.wait(1.0)
+
+
+def test_listen_udp_roundtrip():
+    print("[FULL] listen UDP roundtrip")
+    lst = listen("127.0.0.1", 0, typ="udp")
+
+    def server():
+        tube = lst.wait_for_connection(timeout=2.0)
+        try:
+            tube.recvline(timeout=1.0)
+            tube.sendline(b"UDP-OK")
+        finally:
+            tube.close()
+
+    threading.Thread(target=server, daemon=True).start()
+
+    cl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cl_sock.sendto(b"HELLO\n", ("127.0.0.1", lst.lport))
+    data, _ = cl_sock.recvfrom(4096)
+    print("[UDP listen client] recv:", data)
+    assert data == b"UDP-OK\n"
+    cl_sock.close()
+    lst.close()
 
 
 @pytest.mark.skipif(not socket.has_ipv6, reason="No IPv6 support")

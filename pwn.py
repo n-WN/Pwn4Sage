@@ -869,6 +869,17 @@ def _map_family(fam: Union[str, int]) -> int:
     return socket.AF_UNSPEC
 
 
+def _map_type(typ: Union[str, int]) -> int:
+    if isinstance(typ, int):
+        return typ
+    typ_l = str(typ).lower()
+    if typ_l in ("tcp", "stream"):
+        return socket.SOCK_STREAM
+    if typ_l in ("udp", "dgram", "datagram"):
+        return socket.SOCK_DGRAM
+    return socket.SOCK_STREAM
+
+
 class remote(_SocketTubeBase):
     """TCP tube mirroring pwntools.remote basics."""
 
@@ -886,9 +897,7 @@ class remote(_SocketTubeBase):
         ssl_args: Optional[Dict[str, Any]] = None,
         sni: Union[str, bool] = True,
     ) -> None:
-        if isinstance(typ, str) and typ.lower() != "tcp":
-            raise NotImplementedError("Only TCP is supported currently")
-
+        target_type = _map_type(typ)
         if sock is not None:
             # wrap existing socket
             self._peer = None
@@ -902,7 +911,7 @@ class remote(_SocketTubeBase):
 
         family = _map_family(fam)
         try:
-            addrinfo = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+            addrinfo = socket.getaddrinfo(host, port, family, target_type)
         except socket.gaierror as exc:
             raise OSError(f"Failed to resolve {host}:{port} - {exc}") from exc
 
@@ -913,8 +922,12 @@ class remote(_SocketTubeBase):
                 candidate = socket.socket(af, socktype, proto)
                 if timeout is not None:
                     candidate.settimeout(timeout)
-                candidate.connect(candidate_addr)
-                candidate.settimeout(None)
+                if target_type == socket.SOCK_DGRAM:
+                    candidate.connect(candidate_addr)
+                    candidate.settimeout(None)
+                else:
+                    candidate.connect(candidate_addr)
+                    candidate.settimeout(None)
                 if ssl:
                     # Match pwntools default: TLSv1.2 context when unspecified
                     ctx = ssl_context or _ssl.SSLContext(_ssl.PROTOCOL_TLSv1_2)
@@ -1150,13 +1163,15 @@ class listen:
             host = bindaddr
         af = _map_bindaddr_family(host, fam)
         self.family = af
-        self._sock = socket.socket(af, socket.SOCK_STREAM)
+        self._typ = _map_type(typ)
+        self._sock = socket.socket(af, self._typ)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if af == socket.AF_INET6:
             self._sock.bind((host, port, 0, 0))
         else:
             self._sock.bind((host, port))
-        self._sock.listen(backlog)
+        if self._typ == socket.SOCK_STREAM:
+            self._sock.listen(backlog)
         sockname = self._sock.getsockname()
         if af == socket.AF_INET6:
             self.lhost, self.lport = sockname[0], sockname[1]
@@ -1165,11 +1180,29 @@ class listen:
         _stage("[*]", f"Listening on {self.lhost}:{self.lport}")
 
     def wait_for_connection(self, timeout: Optional[float] = None) -> _SocketTube:
-        self._sock.settimeout(timeout)
-        conn, addr = self._sock.accept()
-        tube = _SocketTube(conn)
-        _log("info", f"Accepted connection from {addr[0]}:{addr[1]}")
-        return tube
+        if self._typ == socket.SOCK_STREAM:
+            self._sock.settimeout(timeout)
+            conn, addr = self._sock.accept()
+            tube = _SocketTube(conn)
+            _log("info", f"Accepted connection from {addr[0]}:{addr[1]}")
+            return tube
+        else:
+            self._sock.settimeout(timeout)
+            try:
+                data, addr = self._sock.recvfrom(4096)
+            except socket.timeout:
+                raise TimeoutError("No datagram received")
+            if addr is None:
+                raise ConnectionError("No peer address for datagram")
+            import os
+            client_fd = os.dup(self._sock.fileno())
+            client_sock = socket.socket(self.family, self._typ, self._sock.proto, fileno=client_fd)
+            client_sock.connect(addr)
+            tube = _SocketTube(client_sock)
+            if data:
+                tube.unrecv(data)
+            _log("info", f"Accepted connection from {addr[0]}:{addr[1]}")
+            return tube
 
     def close(self) -> None:
         self._sock.close()
