@@ -192,6 +192,7 @@ def _start_tls_echo_server(host="127.0.0.1"):
         try:
             conn, _ = srv_sock.accept()
             with ctx.wrap_socket(conn, server_side=True) as tls_conn:
+                tls_conn.sendall(b"READY\n")
                 data = tls_conn.recv(4096)
                 if data:
                     tls_conn.sendall(data)
@@ -213,10 +214,13 @@ def test_remote_tls_local_echo():
     ctx = _ssl._create_unverified_context()
     r = remote("127.0.0.1", port, ssl=True, ssl_context=ctx, sni=False, timeout=2.0)
     try:
+        # server first line
+        first = r.recvline(timeout=2.0)
+        print("tls first:", first)
         r.send(b"HELLO\n")
-        out = r.recv(1024, timeout=2.0)
+        out = r.recvline(timeout=2.0)
         print("tls echo:", out)
-        assert b"HELLO\n" in out
+        assert out == b"HELLO\n"
     finally:
         r.close()
 

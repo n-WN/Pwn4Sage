@@ -930,7 +930,14 @@ class remote(_SocketTubeBase):
                         kw.update(ssl_args)
                     candidate = ctx.wrap_socket(candidate, server_hostname=server_hostname, **kw)
                 created = candidate
-                sockaddr = candidate_addr
+                # candidate_addr can be IPv4 (host, port) or IPv6 (host, port, flow, scope)
+                if isinstance(candidate_addr, tuple) and len(candidate_addr) >= 2 and isinstance(candidate_addr[0], str):
+                    # ensure correct types for annotation
+                    host_s = candidate_addr[0]
+                    port_i = int(candidate_addr[1])
+                    sockaddr = (host_s, port_i)
+                else:
+                    sockaddr = None
                 break
             except OSError as exc:
                 err = exc
@@ -1138,7 +1145,9 @@ def _map_bindaddr_family(bindaddr: str, fam: Union[str, int]) -> int:
 class listen:
     """Minimal listener compatible with pwntools.listen for testing."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 0, backlog: int = 128, *, fam: Union[str, int] = "any", typ: Union[str, int] = "tcp") -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = 0, backlog: int = 128, *, fam: Union[str, int] = "any", typ: Union[str, int] = "tcp", bindaddr: Optional[str] = None) -> None:
+        if bindaddr is not None:
+            host = bindaddr
         af = _map_bindaddr_family(host, fam)
         self.family = af
         self._sock = socket.socket(af, socket.SOCK_STREAM)
@@ -1155,7 +1164,7 @@ class listen:
             self.lhost, self.lport = sockname
         _stage("[*]", f"Listening on {self.lhost}:{self.lport}")
 
-    def wait_for_connection(self, timeout: Optional[float] = None) -> remote:
+    def wait_for_connection(self, timeout: Optional[float] = None) -> _SocketTube:
         self._sock.settimeout(timeout)
         conn, addr = self._sock.accept()
         tube = _SocketTube(conn)
@@ -1278,7 +1287,7 @@ class SSH:
         return not self._closed
 
     # -- higher level helpers ---------------------------------------
-    def shell(self, shell: Optional[str] = None, tty: bool = True) -> process:
+    def shell(self, shell: Optional[str] = None, tty: bool = True):
         argv = list(self._base)
         if tty:
             argv.append("-tt")
@@ -1287,7 +1296,7 @@ class SSH:
             argv += ["--", shell]
         return process(argv, tty=tty, timeout=self.timeout)
 
-    def system(self, cmd: Union[str, Sequence[str]], tty: bool = True, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> process:
+    def system(self, cmd: Union[str, Sequence[str]], tty: bool = True, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None):
         # run a remote command and attach as Tube
         if isinstance(cmd, (list, tuple)):
             remote_cmd = " ".join(map(str, cmd))
@@ -1299,11 +1308,11 @@ class SSH:
         argv += [self.target, "--", remote_cmd]
         return process(argv, tty=tty, timeout=self.timeout, cwd=cwd, env=env)
 
-    def process(self, argv: Union[str, Sequence[str]], tty: bool = True, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> process:
+    def process(self, argv: Union[str, Sequence[str]], tty: bool = True, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None):
         # alias of system with argv
         return self.system(argv, tty=tty, cwd=cwd, env=env)
 
-    def remote(self, host: str, port: int, timeout: Optional[float] = None) -> process:
+    def remote(self, host: str, port: int, timeout: Optional[float] = None):
         # Create a direct TCP connection through SSH stdio
         argv = list(self._base) + ["-W", f"{host}:{port}", self.target]
         return process(argv, tty=False, timeout=timeout or self.timeout)
