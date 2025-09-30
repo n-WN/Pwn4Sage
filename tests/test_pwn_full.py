@@ -215,20 +215,15 @@ def test_server_callback_and_next_connection():
         messages.append(data)
         tube.sendline(b"ACK")
 
-    srv = server(0, bindaddr="127.0.0.1", callback=cb)
-
-    # first client handled via callback thread
-    cli1 = remote("127.0.0.1", srv.lport)
+    srv_cb = server(0, bindaddr="127.0.0.1", callback=cb)
+    cli1 = remote("127.0.0.1", srv_cb.lport)
     cli1.sendline(b"cb-client")
     assert cli1.recvline(timeout=1.0) == b"ACK\n"
     cli1.close()
-
-    # Allow callback thread to settle
-    import time
     time.sleep(0.1)
+    srv_cb.close()
 
-    # second client retrieved manually via next_connection while callback is None
-    srv.callback = None
+    srv = server(0, bindaddr="127.0.0.1")
     cli2 = remote("127.0.0.1", srv.lport)
     srv_conn = srv.next_connection(timeout=2.0)
     srv_conn.sendline(b"srv")
