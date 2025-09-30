@@ -101,3 +101,21 @@ Pwn4Sage 的 `remote`、`listen`、`server` 已按 [pwntools 文档](https://doc
   - 提供 callback 与 `next_connection()` 两种处理模式，兼容 pwntools 的辅助服务器语义。
 
 测试可以通过 `pytest -q` 运行，包含 TCP/UDP/IPv4/IPv6/TLS 等回环用例，保证行为与 pwntools 一致。
+
+### 进阶能力一览
+
+- **日志/观测**
+  - DEBUG 模式自动启用 hexdump、彩色标签、交互全量日志（可通过 `context.interactive_log` 设为 `'off'|'tags'|'full'`）。
+  - `context.log_stream`、`context.log_file` 控制日志输出位置，`context.wiretap`/`tube.wiretap()` 可以镜像原始流量。
+  - `tube.stats()/reset_stats()/peek()` 快速查看 send/recv 统计与缓冲区内容。
+- **发送/接收细节**
+  - `context.consume_delim_newline` 切换 `sendafter`/`sendlineafter` 的“严格匹配”与“提示+换行”兼容模式。
+  - `process(..., tty=True)` 提供最小 PTY 支持，可直接与需要终端语义的程序交互。
+  - `remote.fromsocket()` 支持将已有 `socket.socket` 包装成 Tube，方便在自定义环境中复用。
+- **SSH 轻量封装**
+  - `ssh(user=..., host=..., keyfile=...)` 基于系统 `ssh`，支持 `__call__`、`__getitem__`、`__getattr__` 运行命令，`shell()/system()/process()/remote()` 等行为贴近 pwntools。
+  - `upload_data()` / `download_data()` 可快速在本地与远端间复制数据。
+- **命令行参数魔法**
+  - 解析 `PWNLIB_DEBUG=1`、`python exploit.py DEBUG TIMEOUT=10` 等写法，结果统一暴露在 `args[...]`，并自动联动 `context.log_level`、`context.timeout` 等设置。
+
+更多示例可参考文档以及项目自带测试（`tests/test_pwn_full.py`）中的完整用例集合。
