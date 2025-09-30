@@ -86,4 +86,18 @@ s.interactive()
 ```
 
 
+## Compatibility with pwntools sockets
 
+Pwn4Sage 的 `remote`、`listen`、`server` 已按 [pwntools 文档](https://docs.pwntools.com/en/latest/tubes/sockets.html#) 对齐，实现了以下特性：
+
+- `remote(host, port, *, fam='any', typ='tcp'|'udp', sock=None, ssl=False, ssl_context=None, ssl_args=None, sni=True, timeout=None)`
+  - 支持 IPv4/IPv6、TCP/UDP 两种套接字类型。
+  - 可通过 `remote.fromsocket()` 包装已有 `socket.socket`。
+  - TLS 连接遵循文档语义：默认 TLSv1.2，上层可指定 `ssl_context`/`ssl_args`/`sni`。
+- `listen(port=0, bindaddr='::', fam='any', typ='tcp'|'udp', backlog=128)`
+  - 监听 IPv4/IPv6，`bindaddr`、`fam` 参数与 pwntools 相同。
+  - UDP 场景下 `wait_for_connection()` 会返回与首个客户端绑定的 tube，后续即可使用 `send`/`recv`。
+- `server(port=0, bindaddr='::', fam='any', typ='tcp'|'udp', callback=None, blocking=False, backlog=128)`
+  - 提供 callback 与 `next_connection()` 两种处理模式，兼容 pwntools 的辅助服务器语义。
+
+测试可以通过 `pytest -q` 运行，包含 TCP/UDP/IPv4/IPv6/TLS 等回环用例，保证行为与 pwntools 一致。
