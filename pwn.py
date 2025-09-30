@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+import ssl
 from typing import Any, Dict, Iterable, Iterator, Optional, Sequence, Tuple, Union
 import pty
 import fcntl
@@ -20,10 +21,12 @@ import re
 __all__ = [
     "context",
     "remote",
+    "tls",
     "process",
     "listen",
     "pwn",
     "PTY",
+    "ssh",
 ]
 
 
@@ -802,7 +805,7 @@ class _SocketTubeBase(Tube):
     def _recv_raw(self, max_bytes: int) -> bytes:
         try:
             return self._sock.recv(max_bytes)
-        except BlockingIOError:
+        except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
             return b""
 
     def _send_raw(self, data: bytes) -> None:
@@ -811,7 +814,7 @@ class _SocketTubeBase(Tube):
         while total < len(data):
             try:
                 sent = self._sock.send(view[total:])
-            except BlockingIOError:
+            except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
                 select.select([], [self._sock], [], self.timeout)
                 continue
             if sent == 0:
@@ -848,6 +851,10 @@ class remote(_SocketTubeBase):
         *,
         timeout: Optional[float] = None,
         family: int = socket.AF_UNSPEC,
+        ssl: bool = False,
+        ssl_verify: bool = True,
+        sni: Optional[str] = None,
+        ssl_context: Optional[ssl.SSLContext] = None,
     ) -> None:
         err: Optional[BaseException] = None
         sock: Optional[socket.socket] = None
@@ -858,7 +865,10 @@ class remote(_SocketTubeBase):
         except socket.gaierror as exc:
             raise OSError(f"Failed to resolve {host}:{port} - {exc}") from exc
 
-        _stage("[x]", f"Opening connection to {host} on port {port}")
+        if ssl:
+            _stage("[x]", f"Opening TLS connection to {host} on port {port}")
+        else:
+            _stage("[x]", f"Opening connection to {host} on port {port}")
         for af, socktype, proto, _, candidate_addr in addrinfo:
             candidate = None
             try:
@@ -867,6 +877,18 @@ class remote(_SocketTubeBase):
                     candidate.settimeout(timeout)
                 candidate.connect(candidate_addr)
                 candidate.settimeout(None)
+                # wrap with TLS if requested
+                if ssl:
+                    ctx = ssl_context
+                    if ctx is None:
+                        ctx = ssl.create_default_context() if ssl_verify else ssl._create_unverified_context()
+                    server_hostname = sni or host
+                    try:
+                        candidate = ctx.wrap_socket(candidate, server_hostname=server_hostname)
+                    except Exception:
+                        # ensure candidate gets closed on failure
+                        candidate.close()
+                        raise
                 sock = candidate
                 sockaddr = candidate_addr
                 break
@@ -883,7 +905,19 @@ class remote(_SocketTubeBase):
 
         self._peer = sockaddr
         super().__init__(sock, timeout)
-        _stage("[+]", f"Opened connection to {host} on port {port}")
+        if ssl:
+            _stage("[+]", f"Opened TLS connection to {host} on port {port}")
+        else:
+            _stage("[+]", f"Opened connection to {host} on port {port}")
+
+
+def tls(host: str, port: int, **kwargs: Any) -> remote:
+    """Convenience wrapper for TLS connections.
+
+    Example: s = tls('example.com', 443)
+    """
+    kwargs.setdefault("ssl", True)
+    return remote(host, port, **kwargs)
 
 
 class process(Tube):
@@ -1071,3 +1105,46 @@ class _SocketTube(_SocketTubeBase):
 
 # expose module alias so `from pwn import *; pwn.process(...)` works
 pwn = sys.modules[__name__]
+
+
+def ssh(
+    target: str,
+    *,
+    key: Optional[str] = None,
+    port: Optional[int] = None,
+    options: Optional[Sequence[str]] = None,
+    tty: bool = True,
+    timeout: Optional[float] = None,
+) -> process:
+    """Spawn an SSH session as a Tube using the local ssh client.
+
+    - target: 'user@host' or just 'host'
+    - key: path to identity file, e.g. '~/.ssh/id_rsa'
+    - port: SSH port (default 22)
+    - options: extra '-o' options, e.g. ['ServerAliveInterval=30']
+    - tty: allocate a TTY (recommended True)
+
+    Example:
+        io = ssh('sign@192.168.123.33', key='~/.ssh/txcloud_ed')
+        io.interactive()
+    """
+    argv = ["ssh"]
+    if tty:
+        argv.append("-tt")
+    if port:
+        argv += ["-p", str(port)]
+    if key:
+        argv += ["-i", os.path.expanduser(key)]
+    # safer defaults: accept-new host keys, keepalive
+    o = [
+        "StrictHostKeyChecking=accept-new",
+        "UserKnownHostsFile=~/.ssh/known_hosts",
+        "ServerAliveInterval=30",
+        "ServerAliveCountMax=4",
+    ]
+    if options:
+        o.extend(options)
+    for opt in o:
+        argv += ["-o", opt]
+    argv.append(target)
+    return process(argv, tty=tty, timeout=timeout)
