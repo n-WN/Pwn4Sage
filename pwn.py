@@ -54,6 +54,10 @@ class _Context:
         "log_strip_ansi": False,
         # 'auto' -> text if mostly printable, else hex; 'text' -> always text lines; 'hex' -> always hexdump
         "log_dump": "auto",
+        # where to write logs: 'stderr' or 'stdout'
+        "log_stream": "stderr",
+        # interactive logging mode: 'off' | 'tags' | 'full'
+        "interactive_log": "tags",
         # optional global wiretap sink for all tubes (file path or binary file-like)
         "wiretap": None,
         # strict delimiter handling for send*after
@@ -66,6 +70,8 @@ class _Context:
 
     def __call__(self, **kwargs: Any) -> "_Context":
         self._state.update(kwargs)
+        if "log_level" in kwargs:
+            self._apply_debug_defaults()
         return self
 
     def __getattr__(self, name: str) -> Any:
@@ -78,9 +84,28 @@ class _Context:
             super().__setattr__(name, value)
         else:
             self._state[name] = value
+            if name == "log_level":
+                self._apply_debug_defaults()
 
     def clear(self) -> None:
         self._state = dict(self._defaults)
+        # do not auto-apply here; only when user sets log_level
+
+    # When user switches to debug, default to hex dump + colored tags unless overridden
+    def _apply_debug_defaults(self) -> None:
+        try:
+            level = str(self._state.get("log_level", "")).lower()
+        except Exception:
+            level = ""
+        if level == "debug":
+            # Only set if still at defaults
+            if self._state.get("log_dump", "auto") == "auto":
+                self._state["log_dump"] = "hex"
+            if self._state.get("log_color", False) is False:
+                self._state["log_color"] = True
+            # In debug, prefer full logs inside interactive loop (while preserving user overrides)
+            if self._state.get("interactive_log", "tags") == "tags":
+                self._state["interactive_log"] = "full"
 
     @contextmanager
     def local(self, **kwargs: Any) -> Iterator["_Context"]:
@@ -158,6 +183,11 @@ def _format_tag(tag: str, role: str) -> str:
     return _maybe_color(token, role)
 
 
+def _emit(line: str) -> None:
+    stream = sys.stderr if getattr(context, "log_stream", "stderr") == "stderr" else sys.stdout
+    print(line, file=stream)
+
+
 def _log_tags(level: str, extra_tags: Optional[Sequence[str]], message: str) -> None:
     if not _should_log(level):
         return
@@ -169,7 +199,7 @@ def _log_tags(level: str, extra_tags: Optional[Sequence[str]], message: str) -> 
         for t in extra_tags:
             parts.append(_format_tag(t, _TAG_ROLE.get(t, "info")))
     line = " ".join(parts) + (f" {message}" if message else "")
-    print(line)
+    _emit(line)
 
 
 def _log(level: str, message: str) -> None:
@@ -244,17 +274,26 @@ def _debug_dump(label: str, data: bytes) -> None:
         print("    " + dump)
 
 
-def _log_send(data: bytes) -> None:
+def _log_send(data: bytes, *, in_interactive: bool = False) -> None:
     # Optionally split tiny sends into per-byte logs
     split = bool(getattr(context, "debug_split_small_sends", False))
     if split and len(data) <= 16 and len(data) > 1 and _should_log("debug"):
         for b in data:
             _debug_dump("Sent", bytes([b]))
         return
+    # During interactive mode, allow suppressing full dumps
+    mode = str(getattr(context, "interactive_log", "tags"))
+    if in_interactive and mode == "tags":
+        _log_tags("debug", ["IN"], f"Sent {len(data)} bytes")
+        return
     _debug_dump("Sent", data)
 
 
-def _log_recv(data: bytes) -> None:
+def _log_recv(data: bytes, *, in_interactive: bool = False) -> None:
+    mode = str(getattr(context, "interactive_log", "tags"))
+    if in_interactive and mode == "tags":
+        _log_tags("debug", ["OUT"], f"Received {len(data)} bytes")
+        return
     _debug_dump("Received", data)
 
 
@@ -290,6 +329,8 @@ class Tube:
                 self.wiretap(global_tap)
         except Exception:
             pass
+        # interactive state flag default
+        self._in_interactive = False
 
     # -- hooks ---------------------------------------------------------
     def _fileno(self) -> int:
@@ -455,7 +496,7 @@ class Tube:
             self._buffer.extend(chunk)
             self._bytes_recv += len(chunk)
             self._last_recv_at = time.monotonic()
-            _log_recv(chunk)
+            _log_recv(chunk, in_interactive=self._in_interactive)
             # mirror to wiretap as incoming
             if self._tap is not None:
                 try:
@@ -618,7 +659,7 @@ class Tube:
         self._send_raw(payload)
         self._bytes_sent += len(payload)
         self._last_send_at = time.monotonic()
-        _log_send(payload)
+        _log_send(payload, in_interactive=self._in_interactive)
         # mirror to wiretap as outgoing
         if self._tap is not None:
             try:
@@ -724,6 +765,7 @@ class Tube:
         stdout = sys.stdout.buffer
 
         try:
+            self._in_interactive = True
             while True:
                 fds = [self._fileno(), stdin_fd]
                 ready, _, _ = select.select(fds, [], [], 0.1)
@@ -742,6 +784,7 @@ class Tube:
         except KeyboardInterrupt:
             _log("info", "Interactive session interrupted")
         finally:
+            self._in_interactive = False
             self.close()
 
 
