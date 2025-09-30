@@ -28,6 +28,7 @@ __all__ = [
     "PTY",
     "ssh",
     "SSH",
+    "args",
 ]
 
 
@@ -60,12 +61,20 @@ class _Context:
         "log_dump": "auto",
         # where to write logs: 'stderr' or 'stdout'
         "log_stream": "stderr",
+        # optional log file path (append)
+        "log_file": None,
         # interactive logging mode: 'off' | 'tags' | 'full'
         "interactive_log": "tags",
         # optional global wiretap sink for all tubes (file path or binary file-like)
         "wiretap": None,
         # strict delimiter handling for send*after
         "consume_delim_newline": False,
+        # compatibility toggles
+        "aslr": True,
+        "noptrace": False,
+        "randomize": False,
+        "noterm": False,
+        "local_libcdb": None,
     }
 
     def __init__(self) -> None:
@@ -190,6 +199,14 @@ def _format_tag(tag: str, role: str) -> str:
 def _emit(line: str) -> None:
     stream = sys.stderr if getattr(context, "log_stream", "stderr") == "stderr" else sys.stdout
     print(line, file=stream)
+    # also to log file if configured
+    lf = getattr(context, "log_file", None)
+    if lf:
+        try:
+            with open(lf, "a", encoding="utf-8", errors="replace") as fp:
+                fp.write(line + "\n")
+        except Exception:
+            pass
 
 
 def _log_tags(level: str, extra_tags: Optional[Sequence[str]], message: str) -> None:
@@ -1309,3 +1326,89 @@ def ssh(*, user: Optional[str] = None, host: Optional[str] = None, port: int = 2
     Minimal subset implemented via system ssh, no extra deps.
     """
     return SSH(user=user, host=host, port=port, password=password, key=key, keyfile=keyfile, proxy_command=proxy_command, proxy_sock=proxy_sock, level=level, cache=cache, ssh_agent=ssh_agent, ignore_config=ignore_config, raw=raw, auth_none=auth_none, timeout=timeout, **kw)
+# -- args compatibility ----------------------------------------------
+class _Args:
+    """Minimal pwntools-like args parser.
+
+    - Parses env vars with prefix PWNLIB_ and command-line tokens of the form KEY or KEY=VAL
+    - Exposes mapping-like and attribute-like access; missing keys -> '' (empty string)
+    - Applies common magic keys to context (DEBUG/SILENT/LOG_LEVEL/LOG_FILE/TIMEOUT/STDERR/NOASLR/NOPTRACE/NOTERM)
+    """
+
+    def __init__(self) -> None:
+        self._store: Dict[str, str] = {}
+        self._parsed = False
+        self._parse()
+
+    def _parse(self) -> None:
+        if self._parsed:
+            return
+        self._parsed = True
+        # 1) Env vars PWNLIB_*
+        for k, v in os.environ.items():
+            if k.startswith("PWNLIB_"):
+                key = k[len("PWNLIB_"):]
+                self._store[key] = v
+        # 2) CLI tokens like KEY or KEY=VAL; remove them from sys.argv
+        keep: list[str] = [sys.argv[0]]
+        for tok in sys.argv[1:]:
+            if "=" in tok:
+                k, _, v = tok.partition("=")
+                if k and k.isidentifier():
+                    self._store[k] = v
+                    continue
+            if tok.isidentifier():
+                self._store[tok] = "1"
+                continue
+            keep.append(tok)
+        sys.argv[:] = keep
+        # 3) Apply common magic
+        self._apply_magic()
+
+    def _asbool(self, s: str) -> bool:
+        return s.lower() in {"1", "true", "yes", "on"}
+
+    def _apply_magic(self) -> None:
+        s = self._store
+        if s.get("DEBUG"):
+            context.log_level = "debug"  # triggers debug defaults
+        if s.get("SILENT"):
+            context.log_level = "error"
+        if "LOG_LEVEL" in s:
+            context.log_level = s["LOG_LEVEL"].lower()
+        if "LOG_FILE" in s:
+            context.log_file = s["LOG_FILE"]
+        if s.get("STDERR"):
+            context.log_stream = "stderr"
+        if "TIMEOUT" in s:
+            try:
+                context.timeout = float(s["TIMEOUT"])  # type: ignore
+            except Exception:
+                pass
+        if s.get("NOASLR"):
+            context.aslr = False
+        if s.get("NOPTRACE"):
+            context.noptrace = True
+        if s.get("NOTERM"):
+            context.noterm = True
+        if "LOCAL_LIBCDB" in s:
+            context.local_libcdb = s["LOCAL_LIBCDB"]
+
+    # mapping-like
+    def __getitem__(self, k: str) -> str:
+        return self._store.get(k, "")
+
+    def get(self, k: str, default: str = "") -> str:
+        return self._store.get(k, default)
+
+    # attribute-like
+    def __getattr__(self, k: str) -> str:
+        if k in self._store:
+            return self._store[k]
+        return ""
+
+    def __repr__(self) -> str:
+        return f"_Args({self._store!r})"
+
+
+args = _Args()
