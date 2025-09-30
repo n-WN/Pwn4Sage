@@ -21,7 +21,7 @@ import re
 __all__ = [
     "context",
     "remote",
-    "tls",
+    "ssl",
     "process",
     "listen",
     "pwn",
@@ -957,13 +957,17 @@ class remote(_SocketTubeBase):
         return inst
 
 
-def tls(host: str, port: int, **kwargs: Any) -> remote:
-    """Convenience wrapper for TLS connections.
+def ssl(host: str, port: int, **kwargs: Any) -> remote:  # noqa: A001 - match pwntools naming
+    """Convenience wrapper matching pwntools style.
 
-    Example: s = tls('example.com', 443)
+    Example: s = ssl('example.com', 443)  # equivalent to remote(..., ssl=True)
     """
     kwargs.setdefault("ssl", True)
     return remote(host, port, **kwargs)
+
+# Backward-compatible alias (not exported via __all__)
+def tls(host: str, port: int, **kwargs: Any) -> remote:
+    return ssl(host, port, **kwargs)
 
 
 class process(Tube):
