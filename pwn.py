@@ -21,7 +21,6 @@ import re
 __all__ = [
     "context",
     "remote",
-    "ssl",
     "process",
     "listen",
     "pwn",
@@ -909,7 +908,7 @@ class remote(_SocketTubeBase):
         except socket.gaierror as exc:
             raise OSError(f"Failed to resolve {host}:{port} - {exc}") from exc
 
-        _stage("[x]", f"Opening {'TLS ' if ssl else ''}connection to {host} on port {port}")
+        _stage("[x]", f"Opening connection to {host} on port {port}")
         for af, socktype, proto, _, candidate_addr in addrinfo:
             candidate = None
             try:
@@ -919,7 +918,8 @@ class remote(_SocketTubeBase):
                 candidate.connect(candidate_addr)
                 candidate.settimeout(None)
                 if ssl:
-                    ctx = ssl_context or _ssl.create_default_context()
+                    # Match pwntools default: TLSv1.2 context when unspecified
+                    ctx = ssl_context or _ssl.SSLContext(_ssl.PROTOCOL_TLSv1_2)
                     server_hostname: Optional[str]
                     if sni is True:
                         server_hostname = host
@@ -947,7 +947,7 @@ class remote(_SocketTubeBase):
 
         self._peer = sockaddr
         super().__init__(created, timeout)
-        _stage("[+]", f"Opened {'TLS ' if ssl else ''}connection to {host} on port {port}")
+        _stage("[+]", f"Opened connection to {host} on port {port}")
 
     @classmethod
     def fromsocket(cls, sock: socket.socket, timeout: Optional[float] = None) -> "remote":
