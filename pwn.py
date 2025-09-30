@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-import ssl
+import ssl as _ssl
 from typing import Any, Dict, Iterable, Iterator, Optional, Sequence, Tuple, Union
 import pty
 import fcntl
@@ -806,7 +806,7 @@ class _SocketTubeBase(Tube):
     def _recv_raw(self, max_bytes: int) -> bytes:
         try:
             return self._sock.recv(max_bytes)
-        except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+        except (BlockingIOError, _ssl.SSLWantReadError, _ssl.SSLWantWriteError):
             return b""
 
     def _send_raw(self, data: bytes) -> None:
@@ -815,7 +815,7 @@ class _SocketTubeBase(Tube):
         while total < len(data):
             try:
                 sent = self._sock.send(view[total:])
-            except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            except (BlockingIOError, _ssl.SSLWantReadError, _ssl.SSLWantWriteError):
                 select.select([], [self._sock], [], self.timeout)
                 continue
             if sent == 0:
@@ -842,6 +842,19 @@ class _SocketTubeBase(Tube):
             pass
 
 
+def _map_family(fam: Union[str, int]) -> int:
+    if isinstance(fam, int):
+        return fam
+    fam_l = str(fam).lower()
+    if fam_l in ("any", "unspec"):
+        return socket.AF_UNSPEC
+    if fam_l in ("ipv4", "inet"):
+        return socket.AF_INET
+    if fam_l in ("ipv6", "inet6"):
+        return socket.AF_INET6
+    return socket.AF_UNSPEC
+
+
 class remote(_SocketTubeBase):
     """TCP tube mirroring pwntools.remote basics."""
 
@@ -851,25 +864,35 @@ class remote(_SocketTubeBase):
         port: int,
         *,
         timeout: Optional[float] = None,
-        family: int = socket.AF_UNSPEC,
+        fam: Union[str, int] = "any",
+        typ: Union[str, int] = "tcp",
+        sock: Optional[socket.socket] = None,
         ssl: bool = False,
-        ssl_verify: bool = True,
-        sni: Optional[str] = None,
-        ssl_context: Optional[ssl.SSLContext] = None,
+        ssl_context: Optional[_ssl.SSLContext] = None,
+        ssl_args: Optional[Dict[str, Any]] = None,
+        sni: Union[str, bool] = True,
     ) -> None:
+        if isinstance(typ, str) and typ.lower() != "tcp":
+            raise NotImplementedError("Only TCP is supported currently")
+
+        if sock is not None:
+            # wrap existing socket
+            self._peer = None
+            super().__init__(sock, timeout)
+            _stage("[+]", f"Opened connection to {host}:{port} (from socket)")
+            return
+
         err: Optional[BaseException] = None
-        sock: Optional[socket.socket] = None
+        created: Optional[socket.socket] = None
         sockaddr: Optional[Tuple[str, int]] = None
 
+        family = _map_family(fam)
         try:
             addrinfo = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
         except socket.gaierror as exc:
             raise OSError(f"Failed to resolve {host}:{port} - {exc}") from exc
 
-        if ssl:
-            _stage("[x]", f"Opening TLS connection to {host} on port {port}")
-        else:
-            _stage("[x]", f"Opening connection to {host} on port {port}")
+        _stage("[x]", f"Opening {'TLS ' if ssl else ''}connection to {host} on port {port}")
         for af, socktype, proto, _, candidate_addr in addrinfo:
             candidate = None
             try:
@@ -878,19 +901,20 @@ class remote(_SocketTubeBase):
                     candidate.settimeout(timeout)
                 candidate.connect(candidate_addr)
                 candidate.settimeout(None)
-                # wrap with TLS if requested
                 if ssl:
-                    ctx = ssl_context
-                    if ctx is None:
-                        ctx = ssl.create_default_context() if ssl_verify else ssl._create_unverified_context()
-                    server_hostname = sni or host
-                    try:
-                        candidate = ctx.wrap_socket(candidate, server_hostname=server_hostname)
-                    except Exception:
-                        # ensure candidate gets closed on failure
-                        candidate.close()
-                        raise
-                sock = candidate
+                    ctx = ssl_context or _ssl.create_default_context()
+                    server_hostname: Optional[str]
+                    if sni is True:
+                        server_hostname = host
+                    elif sni is False:
+                        server_hostname = None
+                    else:
+                        server_hostname = str(sni)
+                    kw: Dict[str, Any] = {}
+                    if ssl_args:
+                        kw.update(ssl_args)
+                    candidate = ctx.wrap_socket(candidate, server_hostname=server_hostname, **kw)
+                created = candidate
                 sockaddr = candidate_addr
                 break
             except OSError as exc:
@@ -899,17 +923,21 @@ class remote(_SocketTubeBase):
                     candidate.close()
                 continue
 
-        if sock is None or sockaddr is None:
+        if created is None or sockaddr is None:
             if err is not None:
                 raise err
             raise OSError("Failed to connect to remote host")
 
         self._peer = sockaddr
-        super().__init__(sock, timeout)
-        if ssl:
-            _stage("[+]", f"Opened TLS connection to {host} on port {port}")
-        else:
-            _stage("[+]", f"Opened connection to {host} on port {port}")
+        super().__init__(created, timeout)
+        _stage("[+]", f"Opened {'TLS ' if ssl else ''}connection to {host} on port {port}")
+
+    @classmethod
+    def fromsocket(cls, sock: socket.socket, timeout: Optional[float] = None) -> "remote":
+        inst = object.__new__(cls)
+        _SocketTubeBase.__init__(inst, sock, timeout)
+        inst._peer = None
+        return inst
 
 
 def tls(host: str, port: int, **kwargs: Any) -> remote:
@@ -1077,15 +1105,35 @@ class process(Tube):
             pass
 
 
+def _map_bindaddr_family(bindaddr: str, fam: Union[str, int]) -> int:
+    if isinstance(fam, int):
+        return fam
+    fam_l = str(fam).lower()
+    if fam_l in ("ipv6", "inet6") or ":" in bindaddr:
+        return socket.AF_INET6
+    if fam_l in ("ipv4", "inet"):
+        return socket.AF_INET
+    return socket.AF_INET
+
+
 class listen:
     """Minimal listener compatible with pwntools.listen for testing."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 0, backlog: int = 128) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def __init__(self, host: str = "0.0.0.0", port: int = 0, backlog: int = 128, *, fam: Union[str, int] = "any", typ: Union[str, int] = "tcp") -> None:
+        af = _map_bindaddr_family(host, fam)
+        self.family = af
+        self._sock = socket.socket(af, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, port))
+        if af == socket.AF_INET6:
+            self._sock.bind((host, port, 0, 0))
+        else:
+            self._sock.bind((host, port))
         self._sock.listen(backlog)
-        self.lhost, self.lport = self._sock.getsockname()
+        sockname = self._sock.getsockname()
+        if af == socket.AF_INET6:
+            self.lhost, self.lport = sockname[0], sockname[1]
+        else:
+            self.lhost, self.lport = sockname
         _stage("[*]", f"Listening on {self.lhost}:{self.lport}")
 
     def wait_for_connection(self, timeout: Optional[float] = None) -> remote:
