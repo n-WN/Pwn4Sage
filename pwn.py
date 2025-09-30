@@ -23,10 +23,8 @@ __all__ = [
     "remote",
     "process",
     "listen",
-    "pwn",
     "PTY",
     "ssh",
-    "SSH",
     "args",
 ]
 
