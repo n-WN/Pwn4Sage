@@ -9,6 +9,8 @@ import socket
 import subprocess
 import sys
 import time
+import threading
+import queue
 from contextlib import contextmanager
 import ssl as _ssl
 from typing import Any, Dict, Iterable, Iterator, Optional, Sequence, Tuple, Union
@@ -25,6 +27,7 @@ __all__ = [
     "listen",
     "PTY",
     "ssh",
+    "server",
     "args",
 ]
 
@@ -1206,6 +1209,87 @@ class listen:
 
     def close(self) -> None:
         self._sock.close()
+
+
+class server:
+    """Simplified server helper matching pwntools behaviour."""
+
+    def __init__(
+        self,
+        port: int = 0,
+        *,
+        bindaddr: str = "::",
+        fam: Union[str, int] = "any",
+        typ: Union[str, int] = "tcp",
+        callback: Optional[Any] = None,
+        blocking: bool = False,
+        backlog: int = 128,
+    ) -> None:
+        self._listen = listen(bindaddr, port, backlog=backlog, fam=fam, typ=typ)
+        self.callback = callback
+        self.blocking = blocking
+        self._closed = False
+        self._thread: Optional[threading.Thread] = None
+
+        if callback:
+            if blocking:
+                self._callback_loop()
+            else:
+                thread = threading.Thread(target=self._callback_loop, daemon=True)
+                thread.start()
+                self._thread = thread
+
+    # expose attributes similar to pwntools
+    @property
+    def lhost(self) -> str:
+        return self._listen.lhost
+
+    @property
+    def lport(self) -> int:
+        return self._listen.lport
+
+    @property
+    def family(self) -> int:
+        return self._listen.family
+
+    def _callback_loop(self) -> None:
+        try:
+            while not self._closed:
+                try:
+                    tube = self._listen.wait_for_connection()
+                except (TimeoutError, ConnectionError, OSError):
+                    if self._closed:
+                        break
+                    if self.blocking:
+                        raise
+                    continue
+                if tube is None:
+                    continue
+                try:
+                    if self.callback:
+                        self.callback(tube)
+                except Exception:
+                    if self.blocking:
+                        raise
+                finally:
+                    try:
+                        tube.close()
+                    except Exception:
+                        pass
+        finally:
+            if self.blocking:
+                self.close()
+
+    def next_connection(self, timeout: Optional[float] = None):
+        return self._listen.wait_for_connection(timeout=timeout)
+
+    def close(self) -> None:
+        self._closed = True
+        self._listen.close()
+
+    # alias for pwntools compatibility
+    def wait_for_connection(self, timeout: Optional[float] = None):
+        return self._listen.wait_for_connection(timeout=timeout)
 
 
 class _SocketTube(_SocketTubeBase):

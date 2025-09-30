@@ -15,7 +15,7 @@ import pytest
 # Ensure local pwn.py is imported
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import pwn  # type: ignore
-from pwn import context, process, remote, listen, PTY, args  # type: ignore
+from pwn import context, process, remote, listen, server, PTY, args  # type: ignore
 
 
 def setup_module(module):
@@ -204,6 +204,42 @@ def test_listen_udp_roundtrip():
     lst.close()
 
 
+def test_server_callback_and_next_connection():
+    print("[FULL] server helper callback + next_connection")
+
+    messages = []
+
+    def cb(tube):
+        print("[server cb] reading")
+        data = tube.recvline()
+        messages.append(data)
+        tube.sendline(b"ACK")
+
+    srv = server(0, bindaddr="127.0.0.1", callback=cb)
+
+    # first client handled via callback thread
+    cli1 = remote("127.0.0.1", srv.lport)
+    cli1.sendline(b"cb-client")
+    assert cli1.recvline(timeout=1.0) == b"ACK\n"
+    cli1.close()
+
+    # Allow callback thread to settle
+    import time
+    time.sleep(0.1)
+
+    # second client retrieved manually via next_connection while callback is None
+    srv.callback = None
+    cli2 = remote("127.0.0.1", srv.lport)
+    srv_conn = srv.next_connection(timeout=2.0)
+    srv_conn.sendline(b"srv")
+    assert cli2.recvline(timeout=1.0) == b"srv\n"
+    cli2.close()
+    srv_conn.close()
+    srv.close()
+
+    assert messages == [b"cb-client\n"]
+
+
 @pytest.mark.skipif(not socket.has_ipv6, reason="No IPv6 support")
 def test_listen_ipv6_roundtrip():
     print("[FULL] listen IPv6 roundtrip")
@@ -245,12 +281,14 @@ def _start_tls_echo_server(host="127.0.0.1"):
 
     def run():
         try:
-            conn, _ = srv_sock.accept()
+            conn, addr = srv_sock.accept()
             with ctx.wrap_socket(conn, server_side=True) as tls_conn:
                 tls_conn.sendall(b"READY\n")
                 data = tls_conn.recv(4096)
                 if data:
                     tls_conn.sendall(data)
+        except Exception as exc:
+            print("[TLS srv] exception:", exc)
         finally:
             srv_sock.close()
             try:
