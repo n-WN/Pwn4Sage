@@ -27,6 +27,7 @@ __all__ = [
     "pwn",
     "PTY",
     "ssh",
+    "SSH",
 ]
 
 
@@ -1107,44 +1108,156 @@ class _SocketTube(_SocketTubeBase):
 pwn = sys.modules[__name__]
 
 
-def ssh(
-    target: str,
-    *,
-    key: Optional[str] = None,
-    port: Optional[int] = None,
-    options: Optional[Sequence[str]] = None,
-    tty: bool = True,
-    timeout: Optional[float] = None,
-) -> process:
-    """Spawn an SSH session as a Tube using the local ssh client.
+class SSH:
+    """Lightweight SSH session compatible with common pwntools usage.
 
-    - target: 'user@host' or just 'host'
-    - key: path to identity file, e.g. '~/.ssh/id_rsa'
-    - port: SSH port (default 22)
-    - options: extra '-o' options, e.g. ['ServerAliveInterval=30']
-    - tty: allocate a TTY (recommended True)
-
-    Example:
-        io = ssh('sign@192.168.123.33', key='~/.ssh/txcloud_ed')
-        io.interactive()
+    Uses the local `ssh` client for portability. This provides a close
+    approximation to pwnlib.tubes.ssh for interactive work and running
+    commands, without requiring extra dependencies.
     """
-    argv = ["ssh"]
-    if tty:
-        argv.append("-tt")
-    if port:
-        argv += ["-p", str(port)]
-    if key:
-        argv += ["-i", os.path.expanduser(key)]
-    # safer defaults: accept-new host keys, keepalive
-    o = [
-        "StrictHostKeyChecking=accept-new",
-        "UserKnownHostsFile=~/.ssh/known_hosts",
-        "ServerAliveInterval=30",
-        "ServerAliveCountMax=4",
-    ]
-    if options:
-        o.extend(options)
-    for opt in o:
-        argv += ["-o", opt]
-    argv.append(target)
-    return process(argv, tty=tty, timeout=timeout)
+
+    def __init__(
+        self,
+        *,
+        user: Optional[str] = None,
+        host: Optional[str] = None,
+        port: int = 22,
+        password: Optional[str] = None,  # not supported with system ssh
+        key: Optional[str] = None,       # private key text (unsupported)
+        keyfile: Optional[str] = None,
+        proxy_command: Optional[str] = None,
+        proxy_sock: Optional[str] = None,
+        level: Optional[str] = None,
+        cache: bool = True,
+        ssh_agent: bool = True,
+        ignore_config: bool = False,
+        raw: bool = False,
+        auth_none: bool = False,
+        timeout: Optional[float] = None,
+        **_: Any,
+    ) -> None:
+        self.user = user
+        self.host = host
+        self.port = port
+        self.keyfile = os.path.expanduser(keyfile) if keyfile else None
+        self.timeout = timeout
+        self.proxy_command = proxy_command
+        self.ignore_config = ignore_config
+        self.ssh_agent = ssh_agent
+        self._closed = False
+
+        if self.host is None:
+            raise ValueError("host is required")
+
+        self.target = f"{self.user}@{self.host}" if self.user else self.host
+        self._base = ["ssh"]
+        # Keep TTY-friendly defaults
+        if self.port:
+            self._base += ["-p", str(self.port)]
+        if self.keyfile:
+            self._base += ["-i", self.keyfile]
+        if self.ignore_config:
+            self._base += ["-F", "/dev/null"]
+        if not self.ssh_agent:
+            self._base += ["-o", "IdentitiesOnly=yes"]
+        if self.proxy_command:
+            self._base += ["-o", f"ProxyCommand={self.proxy_command}"]
+        # Safer defaults
+        self._base += [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=4",
+        ]
+
+    # -- helpers -----------------------------------------------------
+    def _argv(self, extra: Sequence[str]) -> list[str]:
+        return list(self._base) + list(extra) + [self.target]
+
+    def _run_bytes(self, cmd: Union[str, Sequence[Union[str, bytes]]]) -> bytes:
+        if isinstance(cmd, (list, tuple)):
+            remote_cmd = " ".join(map(lambda x: x.decode() if isinstance(x, (bytes, bytearray)) else str(x), cmd))
+        else:
+            remote_cmd = str(cmd)
+        argv = self._argv(["--", remote_cmd])
+        p = process(argv, tty=False, timeout=self.timeout)
+        out = p.recvrepeat(1.0)
+        p.close()
+        return out
+
+    # -- pwntools-like conveniences --------------------------------
+    def __call__(self, cmd: Union[str, Sequence[Union[str, bytes]]]) -> bytes:
+        return self._run_bytes(cmd)
+
+    def __getitem__(self, cmd: Union[str, bytes]) -> bytes:
+        return self._run_bytes(cmd)
+
+    def __getattr__(self, name: str):
+        # s.echo('hello') -> run 'echo hello'
+        def runner(*args: Union[str, bytes, int]) -> bytes:
+            parts: list[str] = [name]
+            for a in args:
+                if isinstance(a, bytes):
+                    parts.append(a.decode())
+                else:
+                    parts.append(str(a))
+            return self._run_bytes(parts)
+        return runner
+
+    # -- connection management --------------------------------------
+    def close(self) -> None:
+        self._closed = True
+
+    def connected(self) -> bool:
+        return not self._closed
+
+    # -- higher level helpers ---------------------------------------
+    def shell(self, shell: Optional[str] = None, tty: bool = True) -> process:
+        argv = list(self._base)
+        if tty:
+            argv.append("-tt")
+        argv.append(self.target)
+        if shell is not None:
+            argv += ["--", shell]
+        return process(argv, tty=tty, timeout=self.timeout)
+
+    def system(self, cmd: Union[str, Sequence[str]], tty: bool = True, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> process:
+        # run a remote command and attach as Tube
+        if isinstance(cmd, (list, tuple)):
+            remote_cmd = " ".join(map(str, cmd))
+        else:
+            remote_cmd = str(cmd)
+        argv = list(self._base)
+        if tty:
+            argv.append("-tt")
+        argv += [self.target, "--", remote_cmd]
+        return process(argv, tty=tty, timeout=self.timeout, cwd=cwd, env=env)
+
+    def process(self, argv: Union[str, Sequence[str]], tty: bool = True, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> process:
+        # alias of system with argv
+        return self.system(argv, tty=tty, cwd=cwd, env=env)
+
+    def remote(self, host: str, port: int, timeout: Optional[float] = None) -> process:
+        # Create a direct TCP connection through SSH stdio
+        argv = list(self._base) + ["-W", f"{host}:{port}", self.target]
+        return process(argv, tty=False, timeout=timeout or self.timeout)
+
+    # simple file helpers via cat / dd
+    def download_data(self, remote: str) -> bytes:
+        return self._run_bytes(["cat", remote])
+
+    def upload_data(self, data: Union[bytes, str], remote: str) -> None:
+        if isinstance(data, str):
+            data = data.encode()
+        # Use: ssh target 'cat > remote'
+        argv = self._argv(["--", f"cat > {remote}"])
+        p = process(argv, tty=False, timeout=self.timeout)
+        p.send(data)
+        p.close()
+
+
+def ssh(*, user: Optional[str] = None, host: Optional[str] = None, port: int = 22, password: Optional[str] = None, key: Optional[str] = None, keyfile: Optional[str] = None, proxy_command: Optional[str] = None, proxy_sock: Optional[str] = None, level: Optional[str] = None, cache: bool = True, ssh_agent: bool = True, ignore_config: bool = False, raw: bool = False, auth_none: bool = False, timeout: Optional[float] = None, **kw: Any) -> SSH:
+    """Create an SSH session approximating pwnlib.tubes.ssh.ssh.
+
+    Minimal subset implemented via system ssh, no extra deps.
+    """
+    return SSH(user=user, host=host, port=port, password=password, key=key, keyfile=keyfile, proxy_command=proxy_command, proxy_sock=proxy_sock, level=level, cache=cache, ssh_agent=ssh_agent, ignore_config=ignore_config, raw=raw, auth_none=auth_none, timeout=timeout, **kw)
